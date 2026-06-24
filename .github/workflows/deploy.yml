@@ -1,0 +1,81 @@
+name: CI/CD Deploy
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request: 
+    branches: [ "main", "master" ]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  test-and-validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Prepare SDLC Workspace
+        run: |
+          sudo mkdir -p /workspace
+          sudo chown -R $USER /workspace
+
+      - name: Install standard toolchain linters and test frameworks
+        run: |
+          pip install ruff pytest
+
+      - name: Install dependencies (Canonical)
+        run: pip install --target=/workspace/.sdlc_deps -r requirements.txt 2>/dev/null || true
+
+      - name: Lint (Canonical)
+        run: ruff check --no-cache --extend-exclude=.sdlc_deps . && ruff format --check --exclude=.sdlc_deps .
+
+      - name: Build (Canonical)
+        run: python -m compileall -q -x '(^|/)\.sdlc_deps(/|$)' .
+
+      - name: Test (Canonical)
+        env:
+          PYTHONPATH: /workspace/.sdlc_deps:.
+        run: python -m pytest
+
+  release:
+    needs: test-and-validate
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Authenticate to GCP via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Build source distribution package
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Create GitHub Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
