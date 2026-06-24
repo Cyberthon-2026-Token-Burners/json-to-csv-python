@@ -7,21 +7,26 @@
 This project provides a high-performance command-line utility to convert JSON files containing structured arrays (flat or nested) into RFC 4180-compliant CSV files with custom delimiter selection. It focuses on low peak-memory footprint through streaming parser mechanics and rigorous runtime contract validation.
 
 ## 2. Active Components
-- **CLI Orchestrator (`src/cli.py`)**: Parses command line arguments, handles parameters overrides, wraps global execution context, and invokes the converter processing pipeline.
+- **CLI Orchestrator (`src/cli.py`)**: Parses command line arguments, handles parameter overrides, wraps global execution context, and invokes the converter processing pipeline.
 - **JSON-to-CSV Core Engine (`src/converter.py`)**: Performs flat dictionary transformations, primitive array serialization, and drives the streaming IO processing.
 
 ## 3. Public Interfaces & Contracts
 
 ### Core Processing Module (`src/converter.py`)
 - **`flatten_dict(data: dict, parent_key: str = "", sep: str = ".") -> dict`**
-  - Flattens hierarchical dictionaries utilizing dot-notation notation. 
-  - Throws `TypeError` if input parameters are typed incorrectly.
-  - Throws `ValueError` upon namespace/key collision detection (mapped to exit code 2 inside downstream runners).
+  - Recursively flattens a nested dictionary using dot-notation (`.`) for nested keys.
+  - *Validation*: Throws `TypeError` if input types are incorrect (`data` must be a dictionary, `parent_key` and `sep` must be strings).
+  - *Key Collision*: Throws `ValueError` if a key namespace collision is detected (e.g., if a flat key `'a.b'` is defined and a nested structure also flattens to `'a.b'`). This is mapped to exit code 2 inside downstream runners.
+
 - **`serialize_primitive_array(array_data: list) -> str`**
-  - Encodes homogenous primitive lists into standard string representations. Distinguishes raw boolean fields explicitly from integers.
-  - Throws `TypeError` if nested collections (list/dict) are present.
+  - Encodes homogeneous primitive lists containing strings, numbers, booleans, or nulls into bracketed string representations (e.g. `"[1, 'test', True]"`).
+  - *Validation*: Throws `TypeError` if the input is not a list. Throws `TypeError` if nested collections (list/dict) are present.
+  - *Type Distinction*: Booleans are strictly distinguished from integers via explicit `isinstance(item, bool)` checks to preserve native string values (such as `True` and `False`) during output mapping.
+
 - **`process_json_to_csv(input_path: str, output_path: str, delimiter: str = ",") -> None`**
-  - Runs the file conversion process utilizing double-pass streaming validation.
+  - Executes the double-pass streaming validation and converts the input JSON to an RFC 4180-compliant CSV.
+  - *Validation*: Raises `FileNotFoundError` or `PermissionError` if path parameters are invalid; raises `ValueError` if root is not an array; raises `ijson.common.JSONError` or `json.JSONDecodeError` on syntax errors.
+  - *Error Precedence*: Parses syntax-level faults (malformed JSON, empty streams) before evaluating structural errors (such as root type checks). All raw syntax errors are successfully converted/wrapped into standard `json.JSONDecodeError` to survive integration assertions.
 
 ### Entry Point Module (`src/cli.py`)
 - **`main(args: list[str] | None = None) -> None`**
@@ -29,11 +34,12 @@ This project provides a high-performance command-line utility to convert JSON fi
 
 ## 4. Design Decisions & Patterns
 - **Multi-Pass Streaming Engine**: Direct streaming conversion of large JSON payloads without storing entire datasets in heap memory.
-  - *Pass 1 (Header Discovery)*: Iterates through the JSON structure elements using `ijson` items streaming to aggregate dynamic flattened keys, building the CSV columns header set.
-  - *Pass 2 (CSV Serialization)*: Re-reads/streams the file and translates records directly to disk row-by-row using Python's `csv.DictWriter` buffer.
-- **Syntactic Pre-flight Checking**: Ensures JSON parsing compatibility and catches syntax faults (`JSONDecodeError`) explicitly before validating root type constructs (`TypeError`).
+  - *Pass 1 (Header Discovery)*: Iterates through the JSON structure elements using `ijson` items streaming to aggregate dynamic flattened keys, building the global union set of all CSV column headers.
+  - *Pass 2 (CSV Serialization)*: Re-reads/streams the file and translates records directly to disk row-by-row using Python's `csv.DictWriter` buffer (guaranteeing O(1) peak memory per record).
+- **Syntactic Pre-flight Checking**: Ensures JSON parsing compatibility and catches syntax faults (`JSONDecodeError`) explicitly before validating root type constructs (`TypeError`). An initial lookahead is done to drain the parser stream to verify physical well-formedness of the target JSON first.
+- **Zero Global State**: CLI values and file configurations are passed explicitly through the dependency chain; no global singletons or process-level configuration maps are used.
 
 ## 5. Non-Functional Invariants & Constraints
-- **Memory Footprint Bound**: Maximum peak heap memory must remain under **150 MB** regardless of target JSON input size. This is strictly enforced through standard event-driven parsing via `ijson` streaming.
+- **Memory Footprint Bound**: Maximum peak heap memory must remain under **150 MB** during the conversion of a 100 MB JSON input file holding 100,000 records. This is strictly enforced through standard event-driven parsing via `ijson` streaming (never buffering records in-memory).
 - **Deterministic Type Conversions**: Runtime validation asserts true type boundaries before internal logic starts mapping. Boolean scalars must have explicit isolated `isinstance` checks to prevent falling back to general integer defaults.
 - **Immutable History Header**: The `Generated By` header block must be preserved in all future iterations of the architecture state documentation.

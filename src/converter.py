@@ -38,7 +38,7 @@ def serialize_primitive_array(array_data: list) -> str:
         if not isinstance(item, (bool, int, float, str, type(None))):
             raise TypeError(f"Unsupported type in array: {type(item).__name__}")
 
-    return json.dumps(array_data)
+    return str(array_data)
 
 
 def process_json_to_csv(
@@ -52,7 +52,7 @@ def process_json_to_csv(
             parser = ijson.parse(f, use_float=True)
             first = next(parser, None)
             if first is None:
-                raise ValueError("JSON file is empty")
+                raise json.JSONDecodeError("Expecting value", input_path, 0)
             _, first_event, _ = first
             if first_event != "start_array":
                 # Drain to confirm well-formedness; re-raise parse faults before type fault.
@@ -61,7 +61,7 @@ def process_json_to_csv(
                         continue
                 except ijson.JSONError as exc:
                     raise json.JSONDecodeError(str(exc), input_path, 0) from exc
-                raise TypeError(
+                raise ValueError(
                     f"Root JSON element must be an array, got: {first_event}"
                 )
     except FileNotFoundError:
@@ -99,7 +99,14 @@ def process_json_to_csv(
             writer.writeheader()
             for record in ijson.items(f, "item", use_float=True):
                 flat = flatten_dict(record)
-                row = {k: str(v) if v is not None else "" for k, v in flat.items()}
+                row = {}
+                for k, v in flat.items():
+                    if v is None:
+                        row[k] = ""
+                    elif isinstance(v, list):
+                        row[k] = serialize_primitive_array(v)
+                    else:
+                        row[k] = str(v)
                 writer.writerow(row)
     except ijson.JSONError as exc:
         raise json.JSONDecodeError(str(exc), input_path, 0) from exc
