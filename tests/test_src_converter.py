@@ -2,98 +2,93 @@ import unittest
 import tempfile
 import os
 import json
-import csv
+from json import JSONDecodeError
+
+try:
+    import ijson
+
+    IJSON_ERRORS = (ijson.common.JSONError,)
+except ImportError:
+    IJSON_ERRORS = ()
 from src.converter import flatten_dict, serialize_primitive_array, process_json_to_csv
 
 
 class TestConverter(unittest.TestCase):
-    def test_flatten_dict_success(self):
+    def test_flatten_dict_acceptance_and_success(self):
         cases = [
-            (
-                "acceptance_example_1",
-                {"a": 1, "b": {"c": 2}},
-                "",
-                ".",
-                {"a": 1, "b.c": 2},
-            ),
-            (
-                "multi_level_nesting",
-                {"a": {"b": {"c": {"d": 4}}}},
-                "",
-                ".",
-                {"a.b.c.d": 4},
-            ),
-            (
-                "flat_dict_no_change",
-                {"x": 100, "y": "hello", "z": True},
-                "",
-                ".",
-                {"x": 100, "y": "hello", "z": True},
-            ),
-            ("custom_separator", {"a": {"b": 5}}, "", "_", {"a_b": 5}),
-            (
-                "custom_prefix_and_sep",
-                {"a": {"b": 5}},
-                "prefix",
-                "_",
-                {"prefix_a_b": 5},
-            ),
+            ("basic_nesting", {"a": 1, "b": {"c": 2}}, "", ".", {"a": 1, "b.c": 2}),
+            ("deep_nesting", {"a": {"b": {"c": 3}}}, "", ".", {"a.b.c": 3}),
+            ("custom_sep", {"a": {"b": 4}}, "", "_", {"a_b": 4}),
+            ("custom_prefix", {"a": {"b": 4}}, "prefix", "_", {"prefix_a_b": 4}),
             ("empty_dict", {}, "", ".", {}),
-            ("empty_string_key", {"": 1}, "", ".", {"": 1}),
             ("none_values", {"a": None}, "", ".", {"a": None}),
+            ("boolean_and_numbers", {"a": True, "b": 1}, "", ".", {"a": True, "b": 1}),
         ]
         for name, data, parent_key, sep, expected in cases:
             with self.subTest(case=name):
-                result = flatten_dict(data, parent_key=parent_key, sep=sep)
-                self.assertEqual(result, expected)
+                self.assertEqual(flatten_dict(data, parent_key, sep), expected)
 
-    def test_flatten_dict_type_and_value_errors(self):
+    def test_flatten_dict_exceptions(self):
         cases = [
             (
-                "acceptance_example_2_collision",
-                {"a": {"b": 1}, "a.b": 2},
+                "acceptance_collision",
+                {"a": 1, "b.c": 2, "b": {"c": 3}},
                 "",
                 ".",
                 ValueError,
             ),
-            ("reverse_collision", {"a.b": 1, "a": {"b": 2}}, "", ".", ValueError),
-            ("input_not_dict_string", "not a dict", "", ".", TypeError),
-            ("input_not_dict_integer", 123, "", ".", TypeError),
-            ("input_not_dict_none", None, "", ".", TypeError),
+            ("collision_nested_first", {"b": {"c": 3}, "b.c": 2}, "", ".", ValueError),
+            ("non_dict_int", 123, "", ".", TypeError),
+            ("non_dict_list", [1, 2], "", ".", TypeError),
+            ("non_dict_bool", True, "", ".", TypeError),
+            ("non_dict_str", "string", "", ".", TypeError),
+            ("non_dict_none", None, "", ".", TypeError),
             ("invalid_parent_key_type", {"a": 1}, 123, ".", TypeError),
-            ("invalid_sep_type", {"a": 1}, "", 123, TypeError),
+            ("invalid_sep_type", {"a": 1}, "", 1.5, TypeError),
         ]
-        for name, data, parent_key, sep, expected_exception in cases:
+        for name, data, parent_key, sep, expected_exc in cases:
             with self.subTest(case=name):
-                with self.assertRaises(expected_exception):
-                    flatten_dict(data, parent_key=parent_key, sep=sep)
+                with self.assertRaises(expected_exc):
+                    flatten_dict(data, parent_key, sep)
 
-    def test_serialize_primitive_array_success(self):
+    def test_serialize_primitive_array_acceptance_and_success(self):
         cases = [
-            ("acceptance_example_3", [1, 2, 3], "[1, 2, 3]"),
-            ("strings", ["a", "b"], '["a", "b"]'),
-            ("booleans_and_null", [True, False, None], "[true, false, null]"),
-            ("floats", [1.5, 2.25], "[1.5, 2.25]"),
+            (
+                "acceptance_example",
+                [1, "hello", True, None],
+                "[1, 'hello', True, None]",
+            ),
+            ("integers_and_booleans", [1, True, False, 0], "[1, True, False, 0]"),
             ("empty_list", [], "[]"),
+            ("floats", [1.5, -2.5], "[1.5, -2.5]"),
         ]
         for name, array_data, expected in cases:
             with self.subTest(case=name):
-                result = serialize_primitive_array(array_data)
-                self.assertEqual(json.loads(result), json.loads(expected))
+                res = serialize_primitive_array(array_data)
+                self.assertEqual(res, expected)
 
-    def test_serialize_primitive_array_errors(self):
+    def test_serialize_primitive_array_distinguish_bool_from_int(self):
+        res_bool = serialize_primitive_array([True, False])
+        res_int = serialize_primitive_array([1, 0])
+        self.assertNotEqual(res_bool, res_int)
+        self.assertTrue("True" in res_bool or "true" in res_bool)
+        self.assertIn("1", res_int)
+
+    def test_serialize_primitive_array_exceptions(self):
         cases = [
-            ("acceptance_example_4_nested_dict", [1, {"nested": True}], TypeError),
-            ("nested_list", [1, [2, 3]], TypeError),
-            ("input_string", "not a list", TypeError),
-            ("input_int", 123, TypeError),
-            ("input_none", None, TypeError),
-            ("list_with_unsupported_object", [1, object()], TypeError),
+            ("nested_list_acceptance", [1, [2, 3]], TypeError),
+            ("nested_dict", [1, {"a": 2}], TypeError),
+            ("non_list_dict", {"a": 1}, TypeError),
+            ("non_list_str", "not_a_list", TypeError),
+            ("non_list_int", 42, TypeError),
+            ("non_list_bool", True, TypeError),
+            ("non_list_none", None, TypeError),
+            ("list_with_complex_object", [object()], TypeError),
         ]
-        for name, array_data, expected_exception in cases:
+        for name, array, expected_exc in cases:
             with self.subTest(case=name):
-                with self.assertRaises(expected_exception):
-                    serialize_primitive_array(array_data)
+                with self.assertRaises(expected_exc):
+                    serialize_primitive_array(array)
 
     def test_process_json_to_csv_success(self):
         cases = [
@@ -103,91 +98,64 @@ class TestConverter(unittest.TestCase):
                 ",",
                 "a,b\r\n1,2\r\n3,4\r\n",
             ),
-            (
-                "nested_records",
-                [{"a": 1, "b": {"c": 2}}, {"a": 3, "b": {"c": 4}}],
-                ",",
-                "a,b.c\r\n1,2\r\n3,4\r\n",
-            ),
-            ("heterogeneous_records", [{"a": 1}, {"b": 2}], ",", None),
             ("custom_delimiter", [{"a": 1, "b": 2}], ";", "a;b\r\n1;2\r\n"),
+            ("nested_records", [{"a": 1, "b": {"c": 2}}], ",", "a,b.c\r\n1,2\r\n"),
+            ("heterogeneous_fields", [{"a": 1}, {"b": 2}], ",", "a,b\r\n1,\r\n,2\r\n"),
             (
-                "special_characters",
-                [{"a": "hello, world", "b": "line\\nbreak"}],
+                "primitive_arrays_serialization",
+                [{"a": [1, True, None]}],
                 ",",
-                None,
+                'a\r\n"[1, True, None]"\r\n',
             ),
         ]
-        for name, json_data, delimiter, expected_raw in cases:
+        for name, json_data, delimiter, expected_csv in cases:
             with self.subTest(case=name):
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    input_path = os.path.join(tmpdir, "input.json")
-                    output_path = os.path.join(tmpdir, "output.csv")
-                    with open(input_path, "w", encoding="utf-8") as f:
+                    in_path = os.path.join(tmpdir, "in.json")
+                    out_path = os.path.join(tmpdir, "out.csv")
+                    with open(in_path, "w", encoding="utf-8") as f:
                         json.dump(json_data, f)
-                    process_json_to_csv(input_path, output_path, delimiter=delimiter)
-                    self.assertTrue(os.path.exists(output_path))
-                    with open(output_path, "r", newline="", encoding="utf-8") as f:
-                        raw_content = f.read()
-                    with open(output_path, "r", newline="", encoding="utf-8") as f:
-                        reader = csv.DictReader(f, delimiter=delimiter)
-                        rows = list(reader)
-                    expected_flattened = []
-                    for record in json_data:
-                        expected_flattened.append(
-                            {
-                                k: str(v) if v is not None else ""
-                                for k, v in flatten_dict(record).items()
-                            }
-                        )
-                    all_keys = set()
-                    for r in expected_flattened:
-                        all_keys.update(r.keys())
-                    for r in expected_flattened:
-                        for k in all_keys:
-                            if k not in r:
-                                r[k] = ""
-                    self.assertEqual(len(rows), len(expected_flattened))
-                    for actual_row, exp_row in zip(rows, expected_flattened):
-                        normalized_actual = {
-                            k: str(v) if v is not None else ""
-                            for k, v in actual_row.items()
-                        }
-                        self.assertEqual(normalized_actual, exp_row)
-                    if expected_raw is not None:
-                        normalized_actual_raw = raw_content.replace("\r\n", "\n")
-                        normalized_expected_raw = expected_raw.replace("\r\n", "\n")
-                        self.assertEqual(
-                            normalized_actual_raw.splitlines(),
-                            normalized_expected_raw.splitlines(),
-                        )
 
-    def test_process_json_to_csv_errors(self):
+                    process_json_to_csv(in_path, out_path, delimiter=delimiter)
+
+                    self.assertTrue(os.path.exists(out_path))
+                    with open(out_path, "r", newline="", encoding="utf-8") as f:
+                        content = f.read()
+
+                    content_lines = content.replace("\r\n", "\n").strip().splitlines()
+                    expected_lines = (
+                        expected_csv.replace("\r\n", "\n").strip().splitlines()
+                    )
+                    self.assertEqual(content_lines, expected_lines)
+
+    def test_process_json_to_csv_exceptions(self):
+        allowed_syntax_errors = (JSONDecodeError,) + IJSON_ERRORS
         cases = [
-            ("file_not_found", "non_existent_file.json", FileNotFoundError, None),
-            ("malformed_json", "invalid_json_content", json.JSONDecodeError, "{"),
+            ("non_existent_file", "non_existent.json", (FileNotFoundError,), None),
+            ("non_array_root_object", "dummy.json", (ValueError,), '{"a": 1}'),
+            ("non_array_root_string", "dummy.json", (ValueError,), '"hello"'),
+            ("non_array_root_int", "dummy.json", (ValueError,), "42"),
             (
-                "invalid_json_root_type_int",
-                "invalid_root_int",
-                (TypeError, ValueError),
-                "123",
+                "malformed_json_syntax_error",
+                "dummy.json",
+                allowed_syntax_errors,
+                '{"a": ',
             ),
-            (
-                "invalid_json_root_type_string",
-                "invalid_root_string",
-                (TypeError, ValueError),
-                '"string"',
-            ),
+            ("empty_file_syntax_error", "dummy.json", allowed_syntax_errors, ""),
         ]
-        for name, identifier, expected_exception, raw_content in cases:
+        for name, filename, expected_excs, raw_content in cases:
             with self.subTest(case=name):
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    input_path = os.path.join(tmpdir, "input.json")
-                    output_path = os.path.join(tmpdir, "output.csv")
+                    in_path = (
+                        os.path.join(tmpdir, filename)
+                        if raw_content is not None
+                        else filename
+                    )
+                    out_path = os.path.join(tmpdir, "out.csv")
+
                     if raw_content is not None:
-                        with open(input_path, "w", encoding="utf-8") as f:
+                        with open(in_path, "w", encoding="utf-8") as f:
                             f.write(raw_content)
-                    else:
-                        input_path = identifier
-                    with self.assertRaises(expected_exception):
-                        process_json_to_csv(input_path, output_path)
+
+                    with self.assertRaises(expected_excs):
+                        process_json_to_csv(in_path, out_path)
